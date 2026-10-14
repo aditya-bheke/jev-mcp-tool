@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { log } from '../core/logger.js';
+import { ensureDir } from '../core/paths.js';
 import { scrubSecrets } from '../core/secrets.js';
 import { CortexError, clamp } from '../core/util.js';
 
@@ -28,7 +29,7 @@ export function writeSpool(location, record) {
   const payload = JSON.stringify({ v: 1, ...record, raw_content: scrubPayload(record.raw_content), created_at: Date.now() });
   for (const dir of spoolDirs(location)) {
     try {
-      fs.mkdirSync(dir, { recursive: true });
+      ensureDir(dir);
       fs.writeFileSync(path.join(dir, `${record.hash}.json`), payload);
       return dir;
     } catch {
@@ -134,6 +135,7 @@ export class EvictionStore {
   fetch({ hash, query = null, start_line = null, end_line = null, context_lines = 2 } = {}) {
     const row = this.resolve(hash);
     const lines = row.raw_content.split('\n');
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop(); // trailing newline is not a line
     const total = lines.length;
     let mode;
     let content;

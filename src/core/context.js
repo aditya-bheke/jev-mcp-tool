@@ -4,7 +4,7 @@ import path from 'node:path';
 import { Store } from './db.js';
 import { loadConfig } from './config.js';
 import { configureLogger, log } from './logger.js';
-import { findProjectRoot, globalDbPath, projectIdFor, realpath, resolvePaths } from './paths.js';
+import { ensureDir, findProjectRoot, globalDbPath, projectIdFor, realpath, resolvePaths } from './paths.js';
 import { uuid } from './util.js';
 import { createEngines } from '../engines/index.js';
 
@@ -18,8 +18,8 @@ const INSERT_PROJECT = 'INSERT OR IGNORE INTO projects (id, name, root_path, cre
 export function createContext({ cwd = process.cwd(), root: explicitRoot = null, mode = 'server', logLevel = null } = {}) {
   const root = explicitRoot ? realpath(path.resolve(explicitRoot)) : findProjectRoot(cwd);
   const { dataDir, dbPath } = resolvePaths(root);
-  fs.mkdirSync(dataDir, { recursive: true });
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  ensureDir(dataDir);
+  ensureDir(path.dirname(dbPath));
 
   const config = loadConfig(root ? dataDir : null);
   configureLogger({
@@ -56,7 +56,7 @@ export function createContext({ cwd = process.cwd(), root: explicitRoot = null, 
           if (path.resolve(file) === path.resolve(dbPath)) {
             globalStore = db;
           } else {
-            fs.mkdirSync(path.dirname(file), { recursive: true });
+            ensureDir(path.dirname(file));
             globalStore = new Store(file);
           }
           globalStore.run(INSERT_PROJECT, 'global', 'global', os.homedir(), Date.now());

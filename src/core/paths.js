@@ -48,6 +48,28 @@ export function findProjectRoot(startDir = process.cwd()) {
   return weak ? realpath(weak) : null;
 }
 
+/**
+ * mkdir -p, one level at a time. fs.mkdirSync(dir, { recursive: true }) can spin forever on pseudo
+ * filesystems (e.g. a data path under /proc); a plain mkdir throws instead, so callers can fall back.
+ */
+export function ensureDir(dir) {
+  const missing = [];
+  let current = path.resolve(dir);
+  while (!fs.existsSync(current)) {
+    missing.push(current);
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  for (const d of missing.reverse()) {
+    try {
+      fs.mkdirSync(d);
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
+}
+
 export function codexHome() {
   return process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : path.join(os.homedir(), '.codex');
 }

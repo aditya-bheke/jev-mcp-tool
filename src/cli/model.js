@@ -7,7 +7,7 @@ import { findProjectRoot, resolvePaths } from '../core/paths.js';
 import { clamp, percentile, round } from '../core/util.js';
 import { downloadModel } from '../jev/download.js';
 import { JevEngine } from '../jev/engine.js';
-import { TRIAGE_CRITERIA, TRIAGE_QUESTION } from '../jev/optimizer.js';
+import { buildTriageState, keepProbability, triageRequest } from '../jev/optimizer.js';
 
 function jevConfig() {
   const root = findProjectRoot(process.cwd());
@@ -58,13 +58,9 @@ async function status() {
     await engine.load();
     const s = engine.status();
     lines.push(`loaded on ${s.gpu} in ${s.load_ms}ms`);
-    const probe = await engine.evaluate({
-      primitive: 'noul',
-      state: 'java.lang.AssertionError: expected:<1> but was:<0>\n\tat com.example.OrderServiceTest.testProcess(OrderServiceTest.java:94)',
-      question: TRIAGE_QUESTION,
-      criteria: TRIAGE_CRITERIA,
-    });
-    lines.push(`probe (failing assertion): P(keep) = ${(probe.probability * 100).toFixed(1)}% in ${probe.latency_ms}ms (${probe.prompt_tokens} tokens)`);
+    const trace = 'java.lang.AssertionError: expected:<1> but was:<0>\n\tat com.example.OrderServiceTest.testProcess(OrderServiceTest.java:94)\n[INFO] BUILD FAILURE';
+    const probe = await engine.evaluate(triageRequest(buildTriageState(trace, { command: 'mvn test', exitCode: 1, lineCount: 3 }), cfg.triage_temperature));
+    lines.push(`probe (failing assertion): P(keep) = ${(keepProbability(probe) * 100).toFixed(1)}% in ${probe.latency_ms}ms (${probe.prompt_tokens} tokens)`);
     process.stdout.write(`${lines.join('\n')}\n`);
     return 0;
   } catch (err) {
@@ -90,7 +86,7 @@ async function bench(argv) {
     '[INFO] BUILD SUCCESS',
     '[INFO] Total time:  4.211 s',
   ].join('\n');
-  const params = { primitive: 'noul', state, question: TRIAGE_QUESTION, criteria: TRIAGE_CRITERIA };
+  const params = triageRequest(state, cfg.triage_temperature);
   try {
     const rssStart = process.memoryUsage().rss;
     await engine.load();
@@ -105,7 +101,7 @@ async function bench(argv) {
       const res = await engine.evaluate(params);
       wall.push(performance.now() - t0);
       forward.push(res.latency_ms);
-      probability = res.probability;
+      probability = keepProbability(res);
       rssPeak = Math.max(rssPeak, process.memoryUsage().rss);
     }
     const rssEnd = process.memoryUsage().rss;

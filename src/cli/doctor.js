@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { codexHome, findProjectRoot, resolvePaths } from '../core/paths.js';
+import { codexHome, ensureDir, findProjectRoot, resolvePaths } from '../core/paths.js';
 import { relTime } from '../core/util.js';
 import { AGENTS_BEGIN } from './templates.js';
 
@@ -63,7 +63,7 @@ export async function cmdDoctor() {
   add(root ? 'ok' : 'warn', 'Project root', root ?? 'not detected (global mode). Run inside a repository or set CORTEX_PROJECT_ROOT.');
   const { dataDir, dbPath } = resolvePaths(root);
   try {
-    fs.mkdirSync(dataDir, { recursive: true });
+    ensureDir(dataDir);
     fs.accessSync(dataDir, fs.constants.W_OK);
     add('ok', 'Data directory', `${dataDir} (db: ${dbPath})`);
   } catch (err) {

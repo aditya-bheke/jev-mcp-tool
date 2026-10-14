@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { USER_CONFIG_TEMPLATE } from '../core/config.js';
 import { gitTopLevel } from '../core/git.js';
-import { codexHome } from '../core/paths.js';
+import { codexHome, ensureDir } from '../core/paths.js';
 import { AGENTS_BEGIN, AGENTS_END, GITIGNORE_LINES, SKILLS, agentsBlock, codexTomlSnippet } from './templates.js';
 
 const BIN_PATH = fileURLToPath(new URL('../../bin/cortex.js', import.meta.url));
@@ -124,7 +124,7 @@ function registerWithCodex(snippet) {
     text = '';
   }
   if (/^\s*\[mcp_servers\.cortex\]/m.test(text)) return `Codex config already has [mcp_servers.cortex] (${file}); left unchanged`;
-  fs.mkdirSync(home, { recursive: true });
+  ensureDir(home);
   if (text) fs.copyFileSync(file, `${file}.bak-${Date.now()}`);
   const prefix = text ? `${text.endsWith('\n') ? '' : '\n'}\n` : '';
   fs.writeFileSync(file, `${text}${prefix}${snippet}\n`);
@@ -150,7 +150,7 @@ export async function cmdInit(argv) {
   const cortexCmd = onPath('cortex') ? 'cortex' : `node ${JSON.stringify(BIN_PATH)}`;
 
   const dataDir = path.join(root, '.codex');
-  fs.mkdirSync(dataDir, { recursive: true });
+  ensureDir(dataDir);
 
   const configFile = path.join(dataDir, 'config.json');
   if (!fs.existsSync(configFile) || values.force) {
@@ -167,7 +167,7 @@ export async function cmdInit(argv) {
         report.push(`kept ${rel(file)}`);
         continue;
       }
-      fs.mkdirSync(path.dirname(file), { recursive: true });
+      ensureDir(path.dirname(file));
       fs.writeFileSync(file, body.split('{{CORTEX}}').join(cortexCmd));
       report.push(`wrote ${rel(file)}`);
     }

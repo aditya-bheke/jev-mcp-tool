@@ -5,16 +5,17 @@ import { gitListFiles } from '../core/git.js';
 import { createMatcher } from '../core/glob.js';
 import { toPosix } from '../core/util.js';
 
-// Name fragments that suggest credentials. Applied only to data/config extensions so that source
-// files like src/auth/tokenService.ts stay searchable.
+// Name fragments that suggest credentials. Applied only to structured data/config extensions so
+// that source (src/auth/tokenService.ts) and prose (docs/topics/auth/passwords.txt) stay searchable.
 const SENSITIVE_WORDS = ['secret', 'secrets', 'token', 'tokens', 'credential', 'credentials', 'password', 'passwords'];
-const DATA_EXTENSIONS = ['json', 'yaml', 'yml', 'txt', 'env', 'ini', 'conf', 'cfg', 'properties', 'toml', 'xml', 'csv'];
+const DATA_EXTENSIONS = ['json', 'yaml', 'yml', 'env', 'ini', 'conf', 'cfg', 'properties', 'toml', 'xml', 'csv'];
 
 const SENSITIVE_PATTERNS = [
   '.env', '.env.*', '*.env', '*.pem', '*.key', '*.p12', '*.pfx', '*.jks', '*.keystore', '*.p8', '*.der',
   'id_rsa', 'id_rsa*', 'id_dsa*', 'id_ecdsa*', 'id_ed25519*', '*.kdbx', '.npmrc', '.pypirc', '.netrc',
   '.git-credentials', '.htpasswd', 'credentials', 'credentials.*', '*.tfstate', '*.tfstate.*', '*.tfvars',
   'service-account*.json', 'serviceAccount*.json', 'google-services.json', 'GoogleService-Info.plist',
+  'secret.txt', 'secrets.txt', 'token.txt', 'tokens.txt', 'credentials.txt',
   ...SENSITIVE_WORDS.flatMap((word) => DATA_EXTENSIONS.map((ext) => `*${word}*.${ext}`)),
 ];
 const SENSITIVE_ALLOW = /^\.env\.(?:example|sample|template|dist|defaults)$/i;

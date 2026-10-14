@@ -95,13 +95,13 @@ async function loadEnvironment() {
  */
 async function createDecider(jevConfig) {
   if (!jevConfig.enabled) return null;
-  const { TRIAGE_CRITERIA, TRIAGE_QUESTION } = await import('../jev/optimizer.js');
+  const { keepProbability, triageRequest } = await import('../jev/optimizer.js');
   return async (state) => {
-    const params = { primitive: 'noul', state, question: TRIAGE_QUESTION, criteria: TRIAGE_CRITERIA };
+    const params = triageRequest(state, jevConfig.triage_temperature);
     try {
       const { requestEvaluation } = await import('../jev/ipc.js');
       const result = await requestEvaluation(params, { timeoutMs: jevConfig.timeout_ms });
-      return { probability: result.probability, latency_ms: result.latency_ms, via: 'server' };
+      return { probability: keepProbability(result), latency_ms: result.latency_ms, via: 'server' };
     } catch {
       // no reachable server: fall through
     }
@@ -110,7 +110,7 @@ async function createDecider(jevConfig) {
     const engine = new JevEngine(jevConfig);
     try {
       const result = await engine.evaluate(params);
-      return { probability: result.probability, latency_ms: result.latency_ms, via: 'local' };
+      return { probability: keepProbability(result), latency_ms: result.latency_ms, via: 'local' };
     } catch {
       return null;
     } finally {

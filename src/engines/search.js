@@ -286,12 +286,14 @@ export class SearchEngine {
     if (pathFilter?.glob) args.push('--glob', pathFilter.raw);
     else if (pathFilter?.substring && !fs.existsSync(path.join(root, pathFilter.substring))) args.push('--glob', `*${pathFilter.substring}*`);
     args.push('-e', pattern);
-    if (pathFilter?.substring && fs.existsSync(path.join(root, pathFilter.substring))) args.push('--', pathFilter.substring);
+    // Always pass a path: with no path and a piped stdin, rg searches stdin instead of the tree.
+    args.push('--', pathFilter?.substring && fs.existsSync(path.join(root, pathFilter.substring)) ? pathFilter.substring : '.');
     let via = 'ripgrep';
-    let r = spawnSync('rg', args, { cwd: root, encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+    const spawnOpts = { cwd: root, encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] };
+    let r = spawnSync('rg', args, spawnOpts);
     if (r.error && r.error.code === 'ENOENT') {
       via = 'git-grep';
-      r = spawnSync('git', ['grep', '-n', '-I', '-F', '-e', pattern], { cwd: root, encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+      r = spawnSync('git', ['grep', '-n', '-I', '-F', '-e', pattern], spawnOpts);
     }
     if (r.error || (r.status !== 0 && r.status !== 1) || !r.stdout) return [];
     if (!this.sensitive) this.sensitive = createSensitiveMatcher();

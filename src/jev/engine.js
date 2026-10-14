@@ -235,7 +235,7 @@ export class JevEngine {
 
   /**
    * Run a primitive. Serialized: the single sequence cannot evaluate concurrently.
-   * @param {{primitive: 'noul'|'choice'|'score', state: string, question: string, criteria: Record<string,string>}} params
+   * @param {{primitive: 'noul'|'choice'|'score', state: string, question: string, criteria: Record<string,string>, temperature?: number}} params
    */
   evaluate(params) {
     const run = () => this.runEvaluation(params);
@@ -245,7 +245,7 @@ export class JevEngine {
     return withTimeout(result, budget, 'Jev evaluation');
   }
 
-  async runEvaluation({ primitive, state, question, criteria }) {
+  async runEvaluation({ primitive, state, question, criteria, temperature }) {
     const spec = prepare(primitive, criteria);
     const q = String(question ?? '').trim();
     if (!q) throw new CortexError('JEV_BAD_QUESTION', 'question is required.');
@@ -260,7 +260,8 @@ export class JevEngine {
     const latency = round(performance.now() - t0, 1);
     // z_eff(C) = ln(e^z(C) + e^z(" C")): immune to tokenizer whitespace shifts.
     const effective = answer.ids.map((ids) => logSumExp(ids.map((id) => logits.get(id) ?? -Infinity)));
-    const probabilities = stableSoftmax(effective, this.config.temperature);
+    const calibration = Number.isFinite(temperature) && temperature > 0 ? temperature : this.config.temperature;
+    const probabilities = stableSoftmax(effective, calibration);
     this.evaluations++;
     return { ...spec.finish(probabilities), latency_ms: latency, prompt_tokens: prompt.length };
   }

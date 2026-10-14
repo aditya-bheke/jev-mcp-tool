@@ -1,24 +1,43 @@
-import { NEGATED_ERROR } from '../engines/patterns.js';
+import { NEGATED_ERROR, isSummaryLine } from '../engines/patterns.js';
 import { formatDuration, oneLine } from '../core/util.js';
 
-// Context optimizer: the Noul question used to triage tool output, the compact state excerpt the
+// Context optimizer: the triage request used to classify tool output, the compact state excerpt the
 // model sees, deterministic core-signal extraction and the context receipt that replaces evicted output.
 
-export const TRIAGE_QUESTION =
-  'Must the coding agent read this tool output verbatim to decide its next step (failures, errors, assertion diffs, stack traces, compiler diagnostics, or a specific result it asked for)?';
-
+// Triage is a two-option Choice (a binary softmax over the letter tokens A/B) rather than a true/false
+// Noul: measured on Qwen2.5-0.5B over 16 real build/test/lint/install outputs, true/false answers
+// track "does this look fine?" whatever the question says (5/10 correct), while this framing,
+// with "failure" listed first, separated keep from evict cases 15/16 at T=1 and 16/16 at T=0.6.
+export const TRIAGE_QUESTION = 'What kind of command output is this?';
 export const TRIAGE_CRITERIA = {
-  true: 'The output contains failure signals, errors, diagnostics, or specific results needed for the next step.',
-  false: 'The output is routine: progress logs, downloads, passing tests, build success, or repetitive noise that a one-line summary covers.',
+  failure: 'errors, failed tests, exceptions, or a failed build',
+  success: 'routine output; everything succeeded',
 };
+
+/** Evaluation request whose `failure` probability is P(keep). */
+export function triageRequest(state, temperature) {
+  return { primitive: 'choice', state, question: TRIAGE_QUESTION, criteria: TRIAGE_CRITERIA, temperature };
+}
+
+export function keepProbability(result) {
+  return result.distribution.failure;
+}
 
 const SIGNAL_RE = /(?:error|failure|exception|fatal|undefined|rejected)/i;
 
-/** First failure-marker line (ignoring "0 errors"-style negations), else the last non-empty line. */
+/**
+ * Deterministic core signal: the first failure-marker line (ignoring "0 errors"-style negations);
+ * otherwise the last summary line near the end ("BUILD SUCCESS", "45 passed"); otherwise the last
+ * non-empty line.
+ */
 export function extractCoreSignal(lines) {
   for (const line of lines) {
     const t = line.trim();
     if (t && SIGNAL_RE.test(t) && !NEGATED_ERROR.test(t)) return oneLine(t, 240);
+  }
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 50); i--) {
+    const t = lines[i].trim();
+    if (t && isSummaryLine(t)) return oneLine(t, 240);
   }
   for (let i = lines.length - 1; i >= 0; i--) {
     const t = lines[i].trim();

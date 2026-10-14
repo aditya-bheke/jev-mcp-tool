@@ -80,6 +80,7 @@ export const DEFAULT_CONFIG = {
     context_size: 4096,
     batch_size: 2048,
     temperature: 1.0, // calibration temperature T_cal of the candidate softmax
+    triage_temperature: 0.6, // T_cal used for output triage (calibrated on real build/test logs)
     keep_threshold: 0.7, // P(keep) >= threshold → output stays in context
     min_chars: 300, // size gate: smaller outputs are never triaged
     excerpt_chars: 1000, // head/tail characters shown to the model
@@ -87,7 +88,7 @@ export const DEFAULT_CONFIG = {
     preload: true, // load the model when the MCP server starts
     host: true, // serve evaluations to `cortex run` over a local socket
     cli_inprocess: true, // `cortex run` loads the model itself when no server is reachable
-    timeout_ms: 10000,
+    timeout_ms: 30000, // per evaluation; generous for CPU-only machines (Metal passes take tens of ms)
     load_timeout_ms: 60000,
   },
   output_format: 'text',
@@ -168,6 +169,7 @@ function validate(cfg) {
   j.context_size = Math.round(j.context_size);
   j.batch_size = Math.min(Math.round(j.batch_size), j.context_size);
   clampKey(j, 'temperature', 0.05, 10, d.jev.temperature);
+  clampKey(j, 'triage_temperature', 0.05, 10, d.jev.triage_temperature);
   clampKey(j, 'keep_threshold', 0, 1, d.jev.keep_threshold);
   clampKey(j, 'min_chars', 0, 10_000_000, d.jev.min_chars);
   clampKey(j, 'excerpt_chars', 100, 20_000, d.jev.excerpt_chars);

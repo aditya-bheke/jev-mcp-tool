@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { ensureDir } from '../core/paths.js';
 
 function isGguf(file) {
   const fd = fs.openSync(file, 'r');
@@ -20,7 +21,7 @@ function isGguf(file) {
  */
 export async function downloadModel({ url, dest, force = false, onProgress = null }) {
   if (!force && fs.existsSync(dest)) return { dest, bytes: fs.statSync(dest).size, skipped: true };
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  ensureDir(path.dirname(dest));
   const part = `${dest}.part`;
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status} ${res.statusText}`);

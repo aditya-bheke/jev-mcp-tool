@@ -202,9 +202,9 @@ async function cmdStats(argv) {
 }
 
 function ripgrepCount(root, terms) {
-  const args = ['--count-matches', '--ignore-case', '--no-messages', ...terms.flatMap((t) => ['-e', t])];
+  const args = ['--count-matches', '--ignore-case', '--no-messages', ...terms.flatMap((t) => ['-e', t]), '--', '.'];
   const t0 = performance.now();
-  const r = spawnSync('rg', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120_000 });
+  const r = spawnSync('rg', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] });
   const elapsed = performance.now() - t0;
   if (r.error) return null;
   let matches = 0;

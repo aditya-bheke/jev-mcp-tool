@@ -9,7 +9,7 @@ Local-first context optimization, persistent memory and code search for **OpenAI
                MCP (stdio) │                               │ shell: `cortex run -- npm test`
                            ▼                               ▼
    ┌─────────────────── cortex serve ──────────────────┐   ┌──────── cortex run (CLI) ─────────┐
-   │ Jev engine (Qwen2.5-0.5B, one prefill per call)   │◄──┤ size gate → Jev Noul P(keep)       │
+   │ Jev engine (Qwen2.5-0.5B, one prefill per call)   │◄──┤ size gate → Jev triage P(keep)     │
    │ search · memory · checkpoints · ledger · routing  │ local socket   keep │ condense │ receipt│
    │ eviction store · telemetry                        │   │ full output → SQLite / spool       │
    └──────────────────────┬────────────────────────────┘   └──────────────────┬─────────────────┘
@@ -23,7 +23,7 @@ Local-first context optimization, persistent memory and code search for **OpenAI
 |---|---|
 | **Jev engine** | Three decision primitives answered by a single forward pass (no text generation): **Noul** (calibrated P(true)), **Choice** (best of ≤ 8 options + distribution), **Score** (expected value on a 1..N scale). ~30–55 ms on Apple Silicon. Exposed directly as `cortex_evaluate_state`. |
 | **A. Memory** | Architecture / convention / decision / fix / task memories with confidence, provenance, scope paths. Agent-derived facts are capped at 0.8 until you confirm. Confidence decays when files in a memory's scope change. Global memories (`scope: global`) follow you across repos. |
-| **B. Context optimization** | `cortex run -- <cmd>`: outputs under 300 chars pass through; larger ones go to Jev Noul for P(keep). High-signal output (P ≥ 0.70) stays verbatim (condensed to key lines if huge); low-signal output is stored verbatim and replaced by a `JEV CONTEXT RECEIPT`. Without the model, deterministic line scoring takes over. Nothing is lost: `cortex_fetch_evicted` restores, greps or pages the original. |
+| **B. Context optimization** | `cortex run -- <cmd>`: outputs under 300 chars pass through; larger ones are triaged by the Jev engine for P(keep). High-signal output (P ≥ 0.70) stays verbatim (condensed to key lines if huge); low-signal output is stored verbatim and replaced by a `JEV CONTEXT RECEIPT`. Without the model, deterministic line scoring takes over. Nothing is lost: `cortex_fetch_evicted` restores, greps or pages the original. |
 | **C. Code search** | SQLite FTS5 + BM25 over structural chunks (classes, functions, methods, tests, routes, markdown sections), camelCase/snake_case decomposition, identifier-aware reranking, optional Jev Score reranking, line-numbered snippets, incremental mtime+SHA-256 sync, ripgrep / git-grep fallback. |
 | **D. Checkpoints** | Goal, files, errors, decisions, next step. Resume returns a recovery pack with live git state, files changed since, newer test failures (auto-snapshotted by `cortex run`), recent evictions and dead ends. |
 | **E. Routing** | `cortex_route` scores repo/user skills by name, description and triggers (progressive disclosure), and adds memories, past investigations, known fixes and code pointers in one call. |
@@ -40,6 +40,8 @@ Local-first context optimization, persistent memory and code search for **OpenAI
 3. Each candidate's logit merges its whitespace variants: z_eff(C) = ln(e^z(C) + e^z(" C")). The token cache detects tokenizers without a single-token spaced form (Qwen encodes " 7" as " " + "7") and then ends the prompt with `Answer: ` and uses the bare tokens.
 4. A numerically stable softmax with calibration temperature T_cal gives the distribution: P(t_i) = e^((z_i − m)/T) / Σ e^((z_j − m)/T).
 5. Score returns E[S] = Σ s·P(s). With Qwen's tokenizer, scales go up to 9 (no single "10" token).
+
+**Output triage is a two-option Choice, not a true/false Noul.** Measured on Qwen2.5-0.5B with 16 real build/test/lint/install outputs, true/false answers tracked "does this output look fine?" regardless of the question (5/10 correct, inverted on failures). Choice `A) failure / B) success` with `failure` listed first separated them 15/16 at T_cal = 1 and **16/16 at T_cal = 0.6** (`jev.triage_temperature`): failures scored P(keep) 0.80–0.99, routine output 0.00–0.56. P(keep) = P(failure); it is still a binary softmax over two answer tokens.
 
 The MCP server preloads the model and also serves it on a per-user local socket (mode 0600), so `cortex run` reuses the warm model instead of loading 530 MB per command. If no server is reachable, `cortex run` loads the model in-process (`jev.cli_inprocess`), and if that fails too it falls back to deterministic pruning.
 
@@ -165,6 +167,22 @@ known fix (seen 2×, fixed 3d ago): Reset fake timers in beforeEach [src/test/se
 restore: cortex_fetch_evicted hash=3f9a2c1b7d4e8a21 (query="…" or start_line/end_line)
 ```
 
+## Verified behaviour
+
+Measured end to end in a Linux x64 container (4 CPU cores, no GPU, Node 22) with the real model, a real MCP client session and a Django checkout (~7,000 files):
+
+| Check | Result |
+|---|---|
+| Install, model pull, `cortex doctor` | prebuilt native modules load; GGUF download verified (506 MB); doctor runs a real forward pass |
+| §8.2 A: Java assertion failure | P(keep) 0.95, returned verbatim, exit code 1 preserved |
+| §8.2 B: 2,000-line Maven `BUILD SUCCESS` | P(keep) 0.027, replaced by a receipt |
+| §8.3 restore | `cortex_fetch_evicted` returned the 241,996-byte payload byte-for-byte after a server restart |
+| §8.4 recovery | checkpoint, dead ends and evicted-output pointers recovered by a fresh server process |
+| `cortex run` → server model | evaluated over the local socket (no model load in the CLI process); in-process fallback and rule-based fallback both work |
+| §8.1 memory | RSS flat over 100 passes (no growth). Absolute RSS ~870 MB on x86 CPU, where llama.cpp keeps a repacked copy of the weights; measure on Apple Silicon with `cortex model bench` |
+| §8.1 latency | ~1–5 s per pass on this CPU-only container (prompt-length dependent). The 30–55 ms target assumes Metal and is not measurable here |
+| Code search on Django | cold index 6,966 files in 13 s, incremental re-sync 1.0 s, queries 16–52 ms (84 ms worst case with very common terms), correct symbol in the top 2 for every test query |
+
 ## Configuration (`.codex/config.json`)
 
 Defaults live in `src/core/config.js`. Commonly tuned keys:
@@ -176,7 +194,7 @@ Defaults live in `src/core/config.js`. Commonly tuned keys:
   "pruning": { "inline_max_lines": 40, "stub_max_lines": 14 },
   "jev": {
     "enabled": true, "keep_threshold": 0.7, "min_chars": 300, "excerpt_chars": 1000, "keep_max_chars": 20000,
-    "gpu": "auto", "context_size": 4096, "batch_size": 2048, "temperature": 1.0,
+    "gpu": "auto", "context_size": 4096, "batch_size": 2048, "temperature": 1.0, "triage_temperature": 0.6,
     "preload": true, "host": true, "cli_inprocess": true
   },
   "memory": { "default_min_confidence": 0.7 },
