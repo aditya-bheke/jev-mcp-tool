@@ -11,13 +11,18 @@ Setup
   init [--register] [--force] [--no-index] [--no-agents] [--no-skills]
                                        Scaffold .codex/ (config + skills), the AGENTS.md block,
                                        .gitignore entries and the initial index
-  doctor                               Check Node, SQLite FTS5, paths, Codex config, ripgrep, Ollama
+  doctor                               Check Node, SQLite FTS5, paths, Codex config, ripgrep, Jev model
   config                               Print the effective configuration
+
+Jev decision model (local Qwen2.5-0.5B GGUF)
+  model pull [--force] [--url <u>]     Download the model weights (~530 MB, one time)
+  model status                         Load the model and run a probe evaluation
+  model bench [--runs <n>]             Warm forward-pass latency and RSS over n passes
 
 Context pruning
   run [--label <s>] [--max-lines <n>] [--timeout <sec>] [--raw] -- <command...>
-                                       Run a command; large output is stored locally and replaced
-                                       by a short stub. Exit code is preserved.
+                                       Run a command; the Jev model keeps high-signal output and
+                                       replaces noise with a context receipt. Exit code is preserved.
   compress [--label <s>] [--exit-code <n>]
                                        Prune text from stdin (some-cmd 2>&1 | cortex compress)
   fetch <hash> [--query <q>] [--start <n>] [--end <n>]
@@ -74,6 +79,10 @@ export async function main(argv) {
     case 'doctor': {
       const { cmdDoctor } = await import('./doctor.js');
       return cmdDoctor(rest);
+    }
+    case 'model': {
+      const { cmdModel } = await import('./model.js');
+      return cmdModel(rest);
     }
     default: {
       const { COMMANDS } = await import('./commands.js');

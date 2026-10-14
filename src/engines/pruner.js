@@ -165,7 +165,7 @@ export function repeatLine(repeat) {
 
 /** Build the compact context stub that replaces an evicted payload (default ≤ 14 lines). */
 export function buildStub({
-  analysis, hash, command, exitCode, durationMs, known, repeat, maxLines, lineMax, lineCount, charCount, truncatedBytes = 0,
+  analysis, hash, command, exitCode, durationMs, known, repeat, maxLines, lineMax, lineCount, charCount, truncatedBytes = 0, pKeep = null,
 }) {
   const failed = exitCode != null ? exitCode !== 0 : analysis.errorCount > 0;
   const status = exitCode == null ? (failed ? 'errors detected' : 'no errors detected') : failed ? 'FAILED' : 'ok';
@@ -173,7 +173,8 @@ export function buildStub({
     `[cortex] ${command ? `\`${oneLine(command, 80)}\` ` : ''}exit=${exitCode ?? '?'} ${status}`,
     durationMs != null ? formatDuration(durationMs) : null,
     analysis.classification,
-    `${formatCount(lineCount)} lines (~${formatCount(estimateTokens(charCount))} tok) → evicted #${shortHash(hash)}`,
+    pKeep != null ? `P(keep) ${(pKeep * 100).toFixed(1)}%` : null,
+    `${formatCount(lineCount)} lines (~${formatCount(estimateTokens(charCount))} tok) → stored #${hash.slice(0, 16)}`,
     truncatedBytes ? `capture truncated (${formatCount(truncatedBytes)} bytes dropped)` : null,
   ].filter(Boolean).join(' · ');
 
@@ -198,7 +199,7 @@ export function buildStub({
 
   const shownErrors = body.filter((i) => analysis.kinds[i] === 'error').length;
   const more = analysis.errorCount - shownErrors;
-  const footer = `restore: cortex_fetch_evicted hash=${shortHash(hash)} (query="…" or start_line/end_line)${more > 0 ? ` · +${more} more error lines` : ''}`;
+  const footer = `restore: cortex_fetch_evicted hash=${hash.slice(0, 16)} (query="…" or start_line/end_line)${more > 0 ? ` · +${more} more error lines` : ''}`;
   out.push(footer);
   return out.join('\n');
 }

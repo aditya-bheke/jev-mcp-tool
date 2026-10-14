@@ -209,6 +209,14 @@ export async function cmdInit(argv) {
   if (cortexCmd !== 'cortex') {
     lines.push('Tip: run `npm link` in the cortex-local folder so Codex can call `cortex run -- <cmd>` by name, then rerun `cortex init --force`.', '');
   }
+  try {
+    const { loadConfig } = await import('../core/config.js');
+    if (!fs.existsSync(loadConfig(dataDir).jev.model_path)) {
+      lines.push('Jev model not downloaded yet: run `cortex model pull` (~530 MB) to enable model-based output triage.', '');
+    }
+  } catch {
+    /* config errors are reported by `cortex doctor` */
+  }
   lines.push('Next: restart Codex in this repository and ask it to call cortex_checkpoint_resume.');
   process.stdout.write(`${lines.join('\n')}\n`);
   return 0;

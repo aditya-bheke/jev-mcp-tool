@@ -3,8 +3,8 @@ import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { normalizeOutput } from '../core/util.js';
 
-// `cortex run -- <cmd>` is the interception point for Jev-style pruning. Codex executes it with its
-// own shell tool, so Codex's sandbox and approval policy still apply to the wrapped command; the
+// `cortex run -- <cmd>` is the interception point for context optimization. Codex executes it with
+// its own shell tool, so Codex's sandbox and approval policy still apply to the wrapped command; the
 // MCP server never executes arbitrary commands itself.
 
 /** Bounded capture: keeps the head and a rolling tail when output exceeds maxBytes. */
@@ -89,12 +89,44 @@ async function loadEnvironment() {
   return { ctx: null, fallback: { root, dataDir, projectId: projectIdFor(root), config } };
 }
 
+/**
+ * Jev triage for a CLI process: ask the MCP server's already-loaded model over the local socket;
+ * otherwise (no server, sandboxed socket) load the model in-process when allowed. Null = deterministic.
+ */
+async function createDecider(jevConfig) {
+  if (!jevConfig.enabled) return null;
+  const { TRIAGE_CRITERIA, TRIAGE_QUESTION } = await import('../jev/optimizer.js');
+  return async (state) => {
+    const params = { primitive: 'noul', state, question: TRIAGE_QUESTION, criteria: TRIAGE_CRITERIA };
+    try {
+      const { requestEvaluation } = await import('../jev/ipc.js');
+      const result = await requestEvaluation(params, { timeoutMs: jevConfig.timeout_ms });
+      return { probability: result.probability, latency_ms: result.latency_ms, via: 'server' };
+    } catch {
+      // no reachable server: fall through
+    }
+    if (!jevConfig.cli_inprocess) return null;
+    const { JevEngine } = await import('../jev/engine.js');
+    const engine = new JevEngine(jevConfig);
+    try {
+      const result = await engine.evaluate(params);
+      return { probability: result.probability, latency_ms: result.latency_ms, via: 'local' };
+    } catch {
+      return null;
+    } finally {
+      await engine.dispose();
+    }
+  };
+}
+
 async function pruneAndPrint({ text, command, exitCode, durationMs, truncatedBytes, maxLines, toolName }) {
   let env = null;
   try {
     env = await loadEnvironment();
+    const config = env.ctx?.config ?? env.fallback.config;
     const { processOutput } = await import('../engines/output.js');
-    const res = processOutput({ ...env, text, command, exitCode, durationMs, toolName, truncatedBytes, maxLines });
+    const decide = await createDecider(config.jev);
+    const res = await processOutput({ ...env, text, command, exitCode, durationMs, toolName, truncatedBytes, maxLines, decide });
     writeOut(res.output);
   } catch (err) {
     // Never lose the command's output because of a cortex problem: fall back to passthrough.

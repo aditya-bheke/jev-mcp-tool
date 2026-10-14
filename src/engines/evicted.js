@@ -5,8 +5,12 @@ import { log } from '../core/logger.js';
 import { scrubSecrets } from '../core/secrets.js';
 import { CortexError, clamp } from '../core/util.js';
 
-const FULL_FETCH_MAX_LINES = 2000;
+const FULL_FETCH_MAX_CHARS = 2_000_000;
 const QUERY_FETCH_MAX_LINES = 400;
+
+// Payloads are restored verbatim, so only high-precision credential formats (keys, tokens, JWTs,
+// PEM blocks) are redacted; ordinary log lines stay byte-identical.
+const scrubPayload = (text) => scrubSecrets(text, { strict: true }).text;
 
 /**
  * Spool directories used when the database is not writable (e.g. `cortex run` inside a
@@ -21,7 +25,7 @@ export function spoolDirs({ root = null, dataDir = null, projectId = 'global' } 
 }
 
 export function writeSpool(location, record) {
-  const payload = JSON.stringify({ v: 1, ...record, raw_content: scrubSecrets(record.raw_content).text, created_at: Date.now() });
+  const payload = JSON.stringify({ v: 1, ...record, raw_content: scrubPayload(record.raw_content), created_at: Date.now() });
   for (const dir of spoolDirs(location)) {
     try {
       fs.mkdirSync(dir, { recursive: true });
@@ -34,7 +38,7 @@ export function writeSpool(location, record) {
   return null;
 }
 
-/** Subsystem B recovery store: verbatim (secret-scrubbed) payloads addressed by SHA-256. */
+/** Subsystem B recovery store: verbatim payloads addressed by SHA-256 (credentials redacted). */
 export class EvictionStore {
   constructor(ctx) {
     this.ctx = ctx;
@@ -47,18 +51,20 @@ export class EvictionStore {
     const existing = db.get('SELECT hash FROM evicted_payloads WHERE hash = ?', rec.hash);
     if (existing) {
       db.run(
-        'UPDATE evicted_payloads SET seen_count = seen_count + 1, last_seen_at = ?, stub = ?, command = COALESCE(?, command), exit_code = ? WHERE hash = ?',
+        `UPDATE evicted_payloads SET seen_count = seen_count + 1, last_seen_at = ?, stub = ?, command = COALESCE(?, command),
+          exit_code = ?, p_keep = COALESCE(?, p_keep) WHERE hash = ?`,
         now,
         rec.stub ?? null,
         rec.command ?? null,
         rec.exit_code ?? null,
+        rec.p_keep ?? null,
         rec.hash,
       );
       return { hash: rec.hash, existed: true };
     }
     db.run(
       `INSERT INTO evicted_payloads (hash, project_id, tool_name, command, exit_code, original_size, line_count, stub, signal,
-        error_signature, raw_content, seen_count, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+        error_signature, p_keep, raw_content, seen_count, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       rec.hash,
       projectId,
       rec.tool_name ?? 'cortex run',
@@ -69,7 +75,8 @@ export class EvictionStore {
       rec.stub ?? null,
       rec.signal ?? null,
       rec.error_signature ?? null,
-      scrubSecrets(rec.raw_content).text,
+      rec.p_keep ?? null,
+      scrubPayload(rec.raw_content),
       rec.created_at ?? now,
       now,
     );
@@ -109,7 +116,7 @@ export class EvictionStore {
   }
 
   resolve(hashOrPrefix) {
-    const clean = String(hashOrPrefix ?? '').replace(/^#/, '').trim().toLowerCase();
+    const clean = String(hashOrPrefix ?? '').trim().replace(/^#/, '').replace(/^evict_/i, '').toLowerCase();
     if (clean.length < 6 || !/^[0-9a-f]+$/.test(clean)) {
       throw new CortexError('BAD_HASH', 'Pass the hash from the eviction stub (at least 6 hex characters).');
     }
@@ -186,16 +193,23 @@ export class EvictionStore {
       note = `lines ${a}-${b} of ${total}${b < total ? ` · continue with start_line=${b + 1}` : ''}`;
     } else {
       mode = 'full';
-      content = lines.slice(0, FULL_FETCH_MAX_LINES).join('\n');
-      note = total > FULL_FETCH_MAX_LINES
-        ? `first ${FULL_FETCH_MAX_LINES} of ${total} lines · continue with start_line=${FULL_FETCH_MAX_LINES + 1}`
-        : `${total} lines`;
+      if (row.raw_content.length <= FULL_FETCH_MAX_CHARS) {
+        content = row.raw_content;
+        note = `${total} lines, verbatim`;
+      } else {
+        let chars = 0;
+        let count = 0;
+        while (count < total && chars + lines[count].length + 1 <= FULL_FETCH_MAX_CHARS) chars += lines[count++].length + 1;
+        content = lines.slice(0, count).join('\n');
+        note = `first ${count} of ${total} lines (payload over ${FULL_FETCH_MAX_CHARS.toLocaleString('en-US')} chars) · continue with start_line=${count + 1}`;
+      }
     }
     this.ctx.engines.telemetry.record('evicted_fetch', { output_chars: content.length, meta: { mode } });
     return {
       hash: row.hash,
       command: row.command,
       exit_code: row.exit_code,
+      p_keep: row.p_keep ?? null,
       created_at: row.created_at,
       total_lines: total,
       mode,
@@ -206,7 +220,7 @@ export class EvictionStore {
 
   recent({ since = 0, limit = 3 } = {}) {
     return this.ctx.db.all(
-      `SELECT hash, command, exit_code, line_count, signal, last_seen_at FROM evicted_payloads
+      `SELECT hash, command, exit_code, line_count, signal, p_keep, last_seen_at FROM evicted_payloads
        WHERE project_id = ? AND last_seen_at >= ? ORDER BY last_seen_at DESC LIMIT ?`,
       this.ctx.projectId,
       since,

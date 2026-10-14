@@ -1,10 +1,8 @@
-export const SCHEMA_VERSION = 1;
-
 // porter stemming over unicode61; '_' is a token character so snake_case identifiers stay whole
 // in the content column while their parts live in the decomposed_tokens column.
 const TOKENIZE = `tokenize = "porter unicode61 remove_diacritics 2 tokenchars '_'"`;
 
-export const SCHEMA_SQL = `
+const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -132,16 +130,6 @@ CREATE TRIGGER IF NOT EXISTS code_chunks_au AFTER UPDATE ON code_chunks BEGIN
   VALUES (new.id, new.file_path, new.symbol_name, new.decomposed_tokens, new.content);
 END;
 
--- Optional semantic reranking cache (Ollama embeddings), keyed by chunk content hash.
-CREATE TABLE IF NOT EXISTS chunk_embeddings (
-  chunk_hash TEXT NOT NULL,
-  model TEXT NOT NULL,
-  dims INTEGER NOT NULL,
-  vector BLOB NOT NULL,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (chunk_hash, model)
-);
-
 -- Subsystem D: checkpoints ---------------------------------------------------------
 CREATE TABLE IF NOT EXISTS checkpoints (
   id TEXT PRIMARY KEY,
@@ -256,3 +244,13 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry ON telemetry_events(project_id, created_at);
 `;
+
+// v2: Jev engine. Evicted payloads record the model's retention probability; the Ollama embedding
+// cache from v1 builds is dropped (semantic reranking now uses the in-process Jev Score primitive).
+const SCHEMA_V2 = `
+ALTER TABLE evicted_payloads ADD COLUMN p_keep REAL;
+DROP TABLE IF EXISTS chunk_embeddings;
+`;
+
+/** Ordered migrations; PRAGMA user_version = number of migrations applied. */
+export const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2];

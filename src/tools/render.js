@@ -1,4 +1,4 @@
-import { formatCount, oneLine, relTime, shortHash, shortId, truncate } from '../core/util.js';
+import { formatCount, oneLine, relTime, shortId, truncate } from '../core/util.js';
 
 // Compact, LLM-friendly text renderings of every tool result (set output_format=json for raw data).
 
@@ -135,7 +135,8 @@ export function renderCheckpointResume(d) {
     lines.push(`git: ${d.git.branch ?? '?'}@${d.git.head ?? '?'}${moved}${dirty}`);
   }
   for (const e of d.recent_evictions) {
-    lines.push(`evicted #${shortHash(e.hash)} \`${oneLine(e.command ?? '?', 60)}\` exit=${e.exit_code ?? '?'} ${relTime(e.last_seen_at)}${e.signal ? ` — ${oneLine(e.signal, 140)}` : ''}`);
+    const keep = e.p_keep != null ? ` P(keep) ${(e.p_keep * 100).toFixed(0)}%` : '';
+    lines.push(`evicted #${e.hash.slice(0, 16)} \`${oneLine(e.command ?? '?', 60)}\` exit=${e.exit_code ?? '?'}${keep} ${relTime(e.last_seen_at)}${e.signal ? ` — ${oneLine(e.signal, 140)}` : ''}`);
   }
   for (const inv of d.open_investigations) {
     lines.push(`${inv.outcome === 'dead_end' ? 'avoid (dead end)' : 'open investigation'} [${shortId(inv.id)}]: ${oneLine(inv.hypothesis, 140)}`);
@@ -147,8 +148,22 @@ export function renderCheckpointResume(d) {
   return lines.join('\n');
 }
 
+export function fetchHeader(d) {
+  const keep = d.p_keep != null ? ` · P(keep) ${(d.p_keep * 100).toFixed(1)}%` : '';
+  return `#${d.hash.slice(0, 16)} \`${oneLine(d.command ?? '?', 80)}\` exit=${d.exit_code ?? '?'}${keep} · ${d.note}`;
+}
+
 export function renderFetch(d) {
-  return `#${shortHash(d.hash)} \`${oneLine(d.command ?? '?', 80)}\` exit=${d.exit_code ?? '?'} · ${d.note}\n${d.content}`;
+  return `${fetchHeader(d)}\n${d.content}`;
+}
+
+export function renderEvaluation(d) {
+  const meta = `(${d.latency_ms}ms forward pass, ${d.prompt_tokens} prompt tokens)`;
+  const pct = (v) => `${(v * 100).toFixed(1)}%`;
+  const dist = Object.entries(d.distribution).map(([k, v]) => `${k}=${pct(v)}`).join(' · ');
+  if (d.primitive === 'noul') return `noul: P(true) = ${pct(d.probability)} → ${d.answer} ${meta}\n${dist}`;
+  if (d.primitive === 'choice') return `choice: ${d.winner} (confidence ${pct(d.confidence)}) ${meta}\n${dist}`;
+  return `score: ${d.score} on 1-${d.scale} ${meta}\n${dist}`;
 }
 
 export function renderInvestigationCheck(d) {
@@ -235,6 +250,12 @@ export function renderStats(d) {
     lines.push('Tool calls');
     for (const t of d.tools.slice(0, 12)) lines.push(`  ${t.tool.padEnd(28)} ${String(t.calls).padStart(5)} calls · avg ${ms(t.avg_ms)} · p95 ${ms(t.p95_ms)} · ~${formatCount(t.output_tokens)} tok out`);
     if (d.tool_errors) lines.push(`  errors: ${d.tool_errors}`);
+  }
+  if (d.jev) {
+    const jv = d.jev;
+    const modes = Object.entries(jv.modes).map(([k, v]) => `${k} ${v}`).join(', ') || 'n/a';
+    lines.push('Jev engine');
+    lines.push(`  triage            ${jv.triages} decision(s) · avg P(keep) ${jv.avg_p_keep == null ? 'n/a' : `${(jv.avg_p_keep * 100).toFixed(1)}%`} · avg ${ms(jv.avg_ms)} · p95 ${ms(jv.p95_ms)} · ${modes}`);
   }
   lines.push('Memory & recovery');
   lines.push(`  memories ${d.memory.total} (contested ${d.memory.contested}, stale ${d.memory.stale}) · ${d.memory.queries} queries (hit ${pct(d.memory.hit_rate)}) · ${d.memory.saves} saves`);

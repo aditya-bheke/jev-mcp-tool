@@ -1,6 +1,13 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { log } from './logger.js';
+
+/** Jev decision model (Qwen2.5-0.5B-Instruct, 8-bit GGUF, ~530 MB), shared by every repository. */
+export const DEFAULT_MODEL_FILE = 'qwen2.5-0.5b-instruct-q8_0.gguf';
+export const DEFAULT_MODEL_URL = 'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q8_0.gguf';
+export const MODELS_DIR = fileURLToPath(new URL('../../models/', import.meta.url));
 
 /** Paths never worth indexing: dependencies, build output, caches, lockfiles and binaries. */
 export const DEFAULT_EXCLUDES = [
@@ -40,6 +47,8 @@ export const DEFAULT_CONFIG = {
     snippet_lines: 24,
     candidate_pool: 60,
     rg_fallback: true,
+    // Rerank the top BM25 hits with the Jev Score primitive (MCP server only; ~50 ms per candidate).
+    jev_rerank: { enabled: false, top_k: 6, weight: 0.4 },
   },
   pruning: {
     inline_max_lines: 40,
@@ -63,13 +72,23 @@ export const DEFAULT_CONFIG = {
     telemetry_days: 90,
     checkpoints_keep: 200,
   },
-  semantic: {
-    enabled: false,
-    url: 'http://127.0.0.1:11434',
-    model: 'nomic-embed-text',
-    rerank_top_k: 20,
-    weight: 0.35,
-    timeout_ms: 2500,
+  jev: {
+    enabled: true,
+    model_path: null, // default: <cortex-local>/models/<DEFAULT_MODEL_FILE>; $CORTEX_JEV_MODEL overrides
+    model_url: DEFAULT_MODEL_URL,
+    gpu: 'auto', // 'auto' | 'metal' | 'cuda' | 'vulkan' | false
+    context_size: 4096,
+    batch_size: 2048,
+    temperature: 1.0, // calibration temperature T_cal of the candidate softmax
+    keep_threshold: 0.7, // P(keep) >= threshold → output stays in context
+    min_chars: 300, // size gate: smaller outputs are never triaged
+    excerpt_chars: 1000, // head/tail characters shown to the model
+    keep_max_chars: 20000, // high-signal output larger than this is condensed instead of kept verbatim
+    preload: true, // load the model when the MCP server starts
+    host: true, // serve evaluations to `cortex run` over a local socket
+    cli_inprocess: true, // `cortex run` loads the model itself when no server is reachable
+    timeout_ms: 10000,
+    load_timeout_ms: 60000,
   },
   output_format: 'text',
   log_level: 'info',
@@ -82,7 +101,7 @@ export const USER_CONFIG_TEMPLATE = {
   search: { default_max_results: 5, snippet_lines: 24 },
   pruning: { inline_max_lines: 40, stub_max_lines: 14 },
   memory: { default_min_confidence: 0.7 },
-  semantic: { enabled: false, model: 'nomic-embed-text' },
+  jev: { enabled: true, keep_threshold: 0.7, min_chars: 300, keep_max_chars: 20000 },
   output_format: 'text',
 };
 
@@ -97,6 +116,15 @@ function deepMerge(target, source) {
     else if (value !== undefined) target[key] = value;
   }
   return target;
+}
+
+/** A user config can replace a section with a scalar (e.g. "jev": null); put the default object back. */
+function restoreShape(target, defaults) {
+  for (const [key, value] of Object.entries(defaults)) {
+    if (!isPlainObject(value)) continue;
+    if (!isPlainObject(target[key])) target[key] = structuredClone(value);
+    else restoreShape(target[key], value);
+  }
 }
 
 function clampKey(obj, key, lo, hi, fallback) {
@@ -128,27 +156,35 @@ function validate(cfg) {
   clampKey(cfg.retention, 'evicted_max_mb', 1, 100_000, d.retention.evicted_max_mb);
   clampKey(cfg.retention, 'telemetry_days', 1, 3_650, d.retention.telemetry_days);
   clampKey(cfg.retention, 'checkpoints_keep', 5, 100_000, d.retention.checkpoints_keep);
-  clampKey(cfg.semantic, 'rerank_top_k', 2, 100, d.semantic.rerank_top_k);
-  clampKey(cfg.semantic, 'weight', 0, 1, d.semantic.weight);
-  clampKey(cfg.semantic, 'timeout_ms', 200, 60_000, d.semantic.timeout_ms);
+  clampKey(cfg.search.jev_rerank, 'top_k', 2, 20, d.search.jev_rerank.top_k);
+  clampKey(cfg.search.jev_rerank, 'weight', 0, 1, d.search.jev_rerank.weight);
   if (!['text', 'json'].includes(cfg.output_format)) cfg.output_format = 'text';
   if (!['debug', 'info', 'warn', 'error', 'silent'].includes(cfg.log_level)) cfg.log_level = 'info';
   if (!Array.isArray(cfg.index.exclude)) cfg.index.exclude = [];
 
-  // Strict local-only policy: the optional neural reranker may only talk to a loopback address.
-  if (cfg.semantic.enabled) {
-    try {
-      const host = new URL(cfg.semantic.url).hostname;
-      if (!['localhost', '127.0.0.1', '[::1]', '::1'].includes(host)) {
-        log.warn(`semantic.url "${cfg.semantic.url}" is not a loopback address; semantic reranking disabled (local-only policy)`);
-        cfg.semantic.enabled = false;
-      }
-    } catch {
-      log.warn(`semantic.url "${cfg.semantic.url}" is invalid; semantic reranking disabled`);
-      cfg.semantic.enabled = false;
-    }
-  }
+  const j = cfg.jev;
+  clampKey(j, 'context_size', 512, 32768, d.jev.context_size);
+  clampKey(j, 'batch_size', 32, 8192, d.jev.batch_size);
+  j.context_size = Math.round(j.context_size);
+  j.batch_size = Math.min(Math.round(j.batch_size), j.context_size);
+  clampKey(j, 'temperature', 0.05, 10, d.jev.temperature);
+  clampKey(j, 'keep_threshold', 0, 1, d.jev.keep_threshold);
+  clampKey(j, 'min_chars', 0, 10_000_000, d.jev.min_chars);
+  clampKey(j, 'excerpt_chars', 100, 20_000, d.jev.excerpt_chars);
+  clampKey(j, 'keep_max_chars', 0, 10_000_000, d.jev.keep_max_chars);
+  clampKey(j, 'timeout_ms', 500, 600_000, d.jev.timeout_ms);
+  clampKey(j, 'load_timeout_ms', 1000, 600_000, d.jev.load_timeout_ms);
+  if (!['auto', 'metal', 'cuda', 'vulkan', false].includes(j.gpu)) j.gpu = d.jev.gpu;
+  for (const key of ['enabled', 'preload', 'host', 'cli_inprocess']) j[key] = j[key] !== false;
+  cfg.search.jev_rerank.enabled = cfg.search.jev_rerank.enabled === true;
   return cfg;
+}
+
+function resolveModelPath(configured, baseDir) {
+  const raw = process.env.CORTEX_JEV_MODEL || configured;
+  if (!raw) return path.join(MODELS_DIR, DEFAULT_MODEL_FILE);
+  const expanded = String(raw).startsWith('~/') ? path.join(os.homedir(), String(raw).slice(2)) : String(raw);
+  return path.resolve(baseDir, expanded);
 }
 
 /** Load defaults merged with `<dataDir>/config.json` (if present). */
@@ -165,6 +201,8 @@ export function loadConfig(dataDir) {
     }
   }
   deepMerge(config, user);
+  restoreShape(config, DEFAULT_CONFIG);
+  config.jev.model_path = resolveModelPath(config.jev.model_path, file ? path.dirname(file) : process.cwd());
   const userExcludes = Array.isArray(user?.index?.exclude) ? user.index.exclude.filter((p) => typeof p === 'string') : [];
   config.index.exclude = config.index.replace_default_excludes ? userExcludes : [...DEFAULT_EXCLUDES, ...userExcludes];
   return validate(config);

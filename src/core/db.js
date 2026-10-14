@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { MIGRATIONS } from './schema.js';
 
 /** better-sqlite3 only binds numbers, strings, bigints, buffers and null. */
 function bindable(value) {
@@ -30,13 +30,13 @@ export class Store {
   }
 
   migrate() {
-    const current = this.db.pragma('user_version', { simple: true });
-    if (current >= SCHEMA_VERSION) return;
+    const target = MIGRATIONS.length;
+    if (this.db.pragma('user_version', { simple: true }) >= target) return;
+    // IMMEDIATE transaction + re-check: a concurrent process (CLI vs server) cannot apply twice.
     const apply = this.db.transaction(() => {
       const version = this.db.pragma('user_version', { simple: true });
-      if (version >= SCHEMA_VERSION) return;
-      this.db.exec(SCHEMA_SQL);
-      this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
+      for (let v = version; v < target; v++) this.db.exec(MIGRATIONS[v]);
+      this.db.pragma(`user_version = ${target}`);
     });
     apply.immediate();
   }

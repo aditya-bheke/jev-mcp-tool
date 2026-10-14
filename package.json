@@ -1,7 +1,7 @@
 {
   "name": "cortex-local",
   "version": "1.0.0",
-  "description": "Local-first context optimization, persistent memory and code search engine for OpenAI Codex (MCP server + CLI).",
+  "description": "Local-first context optimization (Jev decision engine), persistent memory and code search for OpenAI Codex (MCP server + CLI).",
   "type": "module",
   "private": true,
   "bin": {
@@ -22,11 +22,16 @@
   },
   "scripts": {
     "start": "node bin/cortex.js serve",
-    "doctor": "node bin/cortex.js doctor"
+    "doctor": "node bin/cortex.js doctor",
+    "model:pull": "node bin/cortex.js model pull",
+    "model:bench": "node bin/cortex.js model bench"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
     "better-sqlite3": "^12.11.1",
     "zod": "^4.1.0"
+  },
+  "optionalDependencies": {
+    "node-llama-cpp": "^3.22.1"
   }
 }

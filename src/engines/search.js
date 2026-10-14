@@ -12,6 +12,14 @@ import { CortexError, clamp, estimateTokens, round, truncate } from '../core/uti
 export const SYMBOL_TYPES = ['class', 'interface', 'enum', 'type', 'struct', 'module', 'function', 'method', 'impl', 'macro', 'test', 'route', 'resource'];
 const SYMBOL_SET = new Set(SYMBOL_TYPES);
 
+const RELEVANCE_LEVELS = {
+  1: 'unrelated to the query',
+  2: 'only shares a few terms with the query',
+  3: 'related code, but not what the query asks for',
+  4: 'relevant implementation or usage',
+  5: 'exactly what the query asks for',
+};
+
 function normalizePathFilter(raw) {
   const p = String(raw ?? '').trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\//, '');
   if (!p) return null;
@@ -93,8 +101,8 @@ function buildSnippet(row, terms, maxLines) {
 }
 
 /**
- * Subsystem C query side: FTS5/BM25 candidates → identifier-aware rerank → optional local
- * semantic rerank → diversified top-k with line-numbered snippets → ripgrep fallback.
+ * Subsystem C query side: FTS5/BM25 candidates → identifier-aware rerank →
+ * Jev Score rerank (optional) → diversified top-k with line-numbered snippets → ripgrep fallback.
  */
 export class SearchEngine {
   constructor(ctx) {
@@ -126,12 +134,12 @@ export class SearchEngine {
       }
     }
     let ranked = this.rerank(rows, terms, compounds);
-    if (ranked.length > 1 && ctx.config.semantic.enabled) {
-      const topK = ctx.config.semantic.rerank_top_k;
-      const reranked = await ctx.engines.semantic.rerank(query, ranked.slice(0, topK));
+    const jevRerank = cfg.jev_rerank;
+    if (ranked.length > 1 && jevRerank.enabled && ctx.jev) {
+      const reranked = await this.jevRerank(query, ranked.slice(0, jevRerank.top_k), jevRerank.weight);
       if (reranked) {
-        ranked = [...reranked, ...ranked.slice(topK)];
-        strategy += '+semantic';
+        ranked = [...reranked, ...ranked.slice(jevRerank.top_k)];
+        strategy += '+jev';
       }
     }
     let results = diversify(ranked, k).map((row, i) => this.toResult(row, i + 1, terms, snippets));
@@ -183,6 +191,27 @@ export class SearchEngine {
     } catch (err) {
       log.warn(`FTS query failed (${match}): ${err.message}`);
       return [];
+    }
+  }
+
+  /** Jev Score (1-5 relevance) blended with the lexical score; null when the engine is unavailable. */
+  async jevRerank(query, rows, weight) {
+    try {
+      const maxLexical = Math.max(...rows.map((r) => r.score), 1e-9);
+      const scored = [];
+      for (const r of rows) {
+        const res = await this.ctx.jev.evaluate({
+          primitive: 'score',
+          state: `File: ${r.file_path}${r.symbol_name ? `\nSymbol: ${r.symbol_type} ${r.symbol_name}` : ''}\n${r.content.slice(0, 1500)}`,
+          question: `How relevant is this code to the search query "${query.slice(0, 300)}"?`,
+          criteria: RELEVANCE_LEVELS,
+        });
+        scored.push({ ...r, relevance: res.score, score: round((1 - weight) * (r.score / maxLexical) + weight * ((res.score - 1) / 4), 4) });
+      }
+      return scored.sort((a, b) => b.score - a.score);
+    } catch (err) {
+      log.debug(`Jev rerank skipped: ${err.message}`);
+      return null;
     }
   }
 

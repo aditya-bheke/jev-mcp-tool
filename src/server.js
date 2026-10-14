@@ -4,6 +4,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createContext } from './core/context.js';
+import { JevEngine } from './jev/engine.js';
+import { startEvaluationHost } from './jev/ipc.js';
 import { log } from './core/logger.js';
 import { findProjectRoot } from './core/paths.js';
 import { CortexError, withTimeout } from './core/util.js';
@@ -15,7 +17,7 @@ export const SERVER_INSTRUCTIONS = [
   'Cortex-Local: local memory, code index and context pruning for this repository (100% on-device).',
   '- Session start / after compaction: cortex_checkpoint_resume. New task: cortex_route.',
   '- Find code by concept or symbol: cortex_search_code (line-ranged snippets). Use rg only for exact strings.',
-  '- Wrap verbose shell commands as `cortex run -- <cmd>`; restore details with cortex_fetch_evicted.',
+  '- Wrap verbose shell commands as `cortex run -- <cmd>`: the local Jev model keeps high-signal output and replaces noise with a context receipt; restore with cortex_fetch_evicted.',
   '- Before a speculative fix: cortex_investigation_check; afterwards: cortex_investigation_log.',
   '- Durable facts: cortex_memory_save / cortex_memory_query. Progress: cortex_checkpoint_save.',
 ].join('\n');
@@ -62,6 +64,24 @@ export async function startServer({ cwd = process.cwd(), root = null } = {}) {
 
   let ctx = null;
   let ctxPromise = null;
+  let jevHost = null;
+
+  /** Jev engine lives for the whole server process: preload in the background, host the CLI socket. */
+  function startJev(context) {
+    const cfg = context.config.jev;
+    context.jev = new JevEngine(cfg);
+    if (!cfg.enabled) return;
+    if (cfg.preload) {
+      context.jev.load().catch((err) => log.warn(`Jev engine unavailable (${err.message}); deterministic pruning stays active`));
+    }
+    if (cfg.host) {
+      startEvaluationHost(context.jev)
+        .then((host) => {
+          jevHost = host;
+        })
+        .catch((err) => log.debug(`Jev host failed: ${err.message}`));
+    }
+  }
 
   async function rootFromClient() {
     try {
@@ -88,6 +108,7 @@ export async function startServer({ cwd = process.cwd(), root = null } = {}) {
         }
         const created = explicit ? createContext({ root: explicit, mode: 'server' }) : createContext({ cwd, mode: 'server' });
         ctx = created;
+        startJev(created);
         log.info(`cortex-local ${VERSION} · project ${created.root ?? '(none: global mode)'} · db ${created.dbPath}`);
         setImmediate(() => {
           runStartupTasks(created).catch((err) => log.warn(`startup tasks failed: ${err.message}`));
@@ -127,14 +148,14 @@ export async function startServer({ cwd = process.cwd(), root = null } = {}) {
     const t0 = performance.now();
     try {
       const out = await tool.handler(context, parsed.data);
-      const text = context.config.output_format === 'json' ? JSON.stringify(out.data) : out.text;
+      const parts = context.config.output_format === 'json' ? [JSON.stringify(out.data)] : out.parts ?? [out.text];
       context.engines.telemetry.record('tool_call', {
         tool: name,
         latency_ms: performance.now() - t0,
         input_chars: safeLength(args),
-        output_chars: text.length,
+        output_chars: parts.reduce((n, part) => n + part.length, 0),
       });
-      return { content: [{ type: 'text', text }] };
+      return { content: parts.map((part) => ({ type: 'text', text: part })) };
     } catch (err) {
       const known = err instanceof CortexError;
       if (!known) log.error(`tool ${name} failed`, err);
@@ -153,11 +174,16 @@ export async function startServer({ cwd = process.cwd(), root = null } = {}) {
     closing = true;
     log.info(`shutting down (${reason})`);
     try {
+      jevHost?.close();
+    } catch {
+      /* ignore */
+    }
+    try {
       ctx?.close();
     } catch {
       /* ignore */
     }
-    process.exit(0);
+    process.exit(0); // native llama.cpp resources are released by the OS
   };
   server.onclose = () => shutdown('transport closed');
   process.stdin.on('end', () => shutdown('stdin closed'));

@@ -19,12 +19,26 @@ const toArray = (v) => {
   return s ? [s] : [];
 };
 
+const toStringMap = (v) => {
+  let value = v;
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return v;
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([k, val]) => [k, typeof val === 'string' ? val : String(val ?? '')]));
+};
+
 export const S = {
   string: (description, { required = false, min = null, max = null, values = null } = {}) => ({ kind: 'string', description, required, min, max, values }),
   integer: (description, { required = false, min = null, max = null } = {}) => ({ kind: 'integer', description, required, min, max }),
   number: (description, { required = false, min = null, max = null } = {}) => ({ kind: 'number', description, required, min, max }),
   boolean: (description, { required = false } = {}) => ({ kind: 'boolean', description, required }),
   stringArray: (description, { required = false, maxItems = 100, maxLength = 1000 } = {}) => ({ kind: 'stringArray', description, required, maxItems, maxLength }),
+  stringMap: (description, { required = false, maxEntries = 20, maxLength = 1000 } = {}) => ({ kind: 'stringMap', description, required, maxEntries, maxLength }),
 };
 
 function compileOne(p) {
@@ -66,6 +80,17 @@ function compileOne(p) {
       return {
         json: { type: 'array', items: { type: 'string' }, description: p.description, maxItems: p.maxItems },
         zod: z.preprocess(toArray, z.array(z.string().max(p.maxLength)).max(p.maxItems)),
+      };
+    case 'stringMap':
+      return {
+        json: { type: 'object', description: p.description, additionalProperties: { type: 'string' } },
+        zod: z.preprocess(
+          toStringMap,
+          z.record(z.string(), z.string().max(p.maxLength)).refine((o) => {
+            const n = Object.keys(o).length;
+            return n >= 1 && n <= p.maxEntries;
+          }, `must have 1-${p.maxEntries} entries`),
+        ),
       };
     default:
       throw new Error(`unknown parameter kind ${p.kind}`);

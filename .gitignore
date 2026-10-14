@@ -1,4 +1,6 @@
 node_modules/
+models/*.gguf
+models/*.part
 *.log
 .DS_Store
 

@@ -45,6 +45,7 @@ export function createContext({ cwd = process.cwd(), root: explicitRoot = null, 
     sessionId: uuid(),
     startedAt: Date.now(),
     engines: null,
+    jev: null, // JevEngine, attached by the MCP server (absent in short-lived CLI contexts)
 
     /** Global (cross-project) memory store: { db, projectId } or null when unavailable. */
     getGlobal() {

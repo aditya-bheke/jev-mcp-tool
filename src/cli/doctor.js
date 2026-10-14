@@ -11,6 +11,36 @@ function version(command, args = ['--version']) {
   return (r.stdout || r.stderr).split('\n')[0].trim();
 }
 
+async function checkJev(cfg, add) {
+  if (!cfg.enabled) {
+    add('ok', 'Jev engine', 'disabled (deterministic pruning only)');
+    return;
+  }
+  let runtime = true;
+  try {
+    await import('node-llama-cpp');
+    add('ok', 'node-llama-cpp', 'installed');
+  } catch (err) {
+    runtime = false;
+    add('warn', 'node-llama-cpp', `not installed (${err.message}); run \`npm install\`. Pruning falls back to deterministic rules.`);
+  }
+  const hasModel = fs.existsSync(cfg.model_path);
+  add(hasModel ? 'ok' : 'warn', 'Jev model', hasModel ? cfg.model_path : `missing at ${cfg.model_path}; run \`cortex model pull\``);
+  if (!runtime || !hasModel) return;
+  const { JevEngine } = await import('../jev/engine.js');
+  const engine = new JevEngine(cfg);
+  try {
+    await engine.load();
+    const res = await engine.evaluate({ primitive: 'noul', state: 'BUILD FAILED: 3 tests failed', question: 'Did the build fail?', criteria: { true: 'it failed', false: 'it passed' } });
+    const s = engine.status();
+    add('ok', 'Jev forward pass', `${s.gpu} · load ${s.load_ms}ms · eval ${res.latency_ms}ms · P(true) ${(res.probability * 100).toFixed(1)}%`);
+  } catch (err) {
+    add('fail', 'Jev forward pass', err.message);
+  } finally {
+    await engine.dispose();
+  }
+}
+
 export async function cmdDoctor() {
   const checks = [];
   const add = (status, label, detail) => checks.push({ status, label, detail });
@@ -57,22 +87,7 @@ export async function cmdDoctor() {
         const skills = ctx.engines.router.loadSkills().filter((s) => s.scope === 'repo');
         add(skills.length ? 'ok' : 'warn', 'Repo skills', skills.length ? skills.map((s) => s.name).join(', ') : 'none in .codex/skills. Run `cortex init`.');
       }
-      if (ctx.config.semantic.enabled) {
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 2000);
-          const res = await fetch(new URL('/api/tags', ctx.config.semantic.url), { signal: controller.signal });
-          clearTimeout(timer);
-          const json = await res.json();
-          const names = (json.models ?? []).map((m) => m.name);
-          const hasModel = names.some((n) => n === ctx.config.semantic.model || n.startsWith(`${ctx.config.semantic.model}:`));
-          add(hasModel ? 'ok' : 'warn', 'Ollama (semantic rerank)', hasModel ? `${ctx.config.semantic.model} available` : `model missing. Run \`ollama pull ${ctx.config.semantic.model}\``);
-        } catch (err) {
-          add('warn', 'Ollama (semantic rerank)', `not reachable at ${ctx.config.semantic.url} (${err.message}); BM25-only search will be used`);
-        }
-      } else {
-        add('ok', 'Semantic rerank', 'disabled (deterministic BM25 only)');
-      }
+      await checkJev(ctx.config.jev, add);
     } finally {
       ctx.close();
     }

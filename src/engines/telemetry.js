@@ -74,6 +74,11 @@ export class Telemetry {
     const fetches = by('evicted_fetch');
     const evictionSaved = sum(evictions, 'tokens_saved');
     const restored = Math.round(sum(fetches, 'output_chars') / 4);
+    const triages = by('jev_triage');
+    const triageMeta = triages.map((r) => safeJsonParse(r.meta, {}));
+    const pKeeps = triageMeta.map((m) => m.p_keep).filter((v) => Number.isFinite(v));
+    const modes = {};
+    for (const m of triageMeta) if (m.mode) modes[m.mode] = (modes[m.mode] ?? 0) + 1;
     const memoryQueries = by('memory_query');
     const checks = by('investigation_check');
     const memoryCounts = db.get(
@@ -111,6 +116,12 @@ export class Telemetry {
       },
       investigations: { checks: checks.length, prior_work_found: checks.filter((r) => r.hit === 1).length },
       checkpoints: { saved: checkpointCount, resumes: by('checkpoint_resume').length },
+      jev: {
+        triages: triages.length,
+        avg_p_keep: pKeeps.length ? round(pKeeps.reduce((a, b) => a + b, 0) / pKeeps.length, 4) : null,
+        ...latency(triages),
+        modes,
+      },
       tools,
       tool_errors: by('tool_error').length,
       index: this.ctx.root ? this.ctx.engines.indexer.stats() : null,

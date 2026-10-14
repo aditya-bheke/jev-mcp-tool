@@ -2,9 +2,11 @@ import { S, compileParams } from './schema.js';
 import * as R from './render.js';
 import { MANAGE_ACTIONS, MEMORY_CATEGORIES, SOURCE_TYPES } from '../engines/memory.js';
 import { OUTCOMES } from '../engines/investigations.js';
+import { PRIMITIVES } from '../jev/engine.js';
+import { CortexError } from '../core/util.js';
 
-// Section 5: the MCP tool catalog. Descriptions are short on purpose: every tool schema is paid
-// for in context on every turn.
+// The MCP tool catalog. Descriptions are short on purpose: every tool schema is paid for in context
+// on every turn. A handler returns { data, text } or, for multi-part output, { data, text, parts }.
 
 const DEFINITIONS = [
   {
@@ -126,10 +128,10 @@ const DEFINITIONS = [
   {
     name: 'cortex_fetch_evicted',
     description:
-      'Restore output that `cortex run` evicted from context. Prefer query (grep with context, /regex/ allowed) or a line range over the full payload.',
+      'Restore output that `cortex run` replaced with a receipt or stub. Without query/range it returns the full payload verbatim; prefer query (grep with context, /regex/ allowed) or a line range.',
     annotations: { title: 'Fetch evicted output', readOnlyHint: true },
     params: {
-      hash: S.string('Hash (or 6+ char prefix) from the stub.', { required: true, min: 6, max: 64 }),
+      hash: S.string('Hash from the receipt/stub (16 chars; "evict_" prefix and 6+ char prefixes accepted).', { required: true, min: 6, max: 72 }),
       query: S.string('Case-insensitive substring or /regex/ to grep for.', { max: 300 }),
       start_line: S.integer('First line (1-based).', { min: 1 }),
       end_line: S.integer('Last line (inclusive).', { min: 1 }),
@@ -137,7 +139,9 @@ const DEFINITIONS = [
     },
     handler: async (ctx, a) => {
       const data = ctx.engines.evicted.fetch(a);
-      return { data, text: R.renderFetch(data) };
+      // Full mode: the payload is its own content part, byte-for-byte as stored.
+      const parts = data.mode === 'full' ? [R.fetchHeader(data), data.content] : undefined;
+      return { data, text: R.renderFetch(data), parts };
     },
   },
   {
@@ -174,6 +178,23 @@ const DEFINITIONS = [
     handler: async (ctx, a) => {
       const data = ctx.engines.investigations.log(a);
       return { data, text: R.renderInvestigationLog(data) };
+    },
+  },
+  {
+    name: 'cortex_evaluate_state',
+    description:
+      'Direct local Jev decision (one forward pass of the on-device model, ~50 ms): noul = calibrated P(true); choice = best of 2-8 options with a distribution; score = expected value on a 1..N scale (N <= 9).',
+    annotations: { title: 'Evaluate state (Jev)', readOnlyHint: true },
+    params: {
+      primitive: S.string('noul | choice | score.', { required: true, values: PRIMITIVES }),
+      state: S.string('Context to evaluate: log excerpt, stack trace, code, or the situation.', { required: true, min: 1, max: 32000 }),
+      question: S.string('The question to answer about the state.', { required: true, min: 1, max: 2000 }),
+      criteria: S.stringMap('noul: {"true": "...", "false": "..."}; choice: {"<option>": "<description>"} (2-8); score: {"1": "...", ..., "N": "..."}.', { required: true, maxEntries: 10, maxLength: 1000 }),
+    },
+    handler: async (ctx, a) => {
+      if (!ctx.jev) throw new CortexError('JEV_UNAVAILABLE', 'The Jev engine runs only inside the MCP server.');
+      const data = await ctx.jev.evaluate(a);
+      return { data, text: R.renderEvaluation(data) };
     },
   },
   {

@@ -12,7 +12,7 @@ The \`cortex\` MCP server runs entirely on this machine. Use it to save context 
 1. **Session start or after compaction:** call \`cortex_checkpoint_resume\` before multi-step work and continue from its next step.
 2. **New task:** \`cortex_route\` with the task to get matching skills, memories, past investigations and code locations.
 3. **Finding code:** \`cortex_search_code\` for concepts and unfamiliar symbols (top-5 snippets with line ranges). Use \`rg\` only for exact strings. Read line spans (\`sed -n 'A,Bp' FILE\`), not whole files.
-4. **Verbose commands** (tests, builds, installs, linters): run them as \`${cortexCmd} run -- <command>\`. Large output becomes a short stub; restore details with \`cortex_fetch_evicted\` (prefer \`query\` or a line range).
+4. **Verbose commands** (tests, builds, installs, linters): run them as \`${cortexCmd} run -- <command>\`. A local model keeps high-signal output (failures) and replaces routine output with a \`JEV CONTEXT RECEIPT\`; restore anything with \`cortex_fetch_evicted\` (prefer \`query\` or a line range).
 5. **Debugging:** before trying a fix, call \`cortex_investigation_check\` with your hypothesis and the key error lines. After it is confirmed or disproven, call \`cortex_investigation_log\`.
 6. **Checkpoints:** \`cortex_checkpoint_save\` after tests go green, before risky edits, and when blocked.
 7. **Memory:** save durable architecture, convention and decision facts with \`cortex_memory_save\` (\`source_type=user_instruction\` when the user said it). Check \`cortex_memory_query\` before assuming. Never store secrets.
@@ -86,8 +86,8 @@ metadata:
 # Context pruning
 
 - Wrap any command whose output may exceed about 40 lines: \`{{CORTEX}} run -- npm test\`, \`{{CORTEX}} run -- ./gradlew build\`, \`{{CORTEX}} run -- "npm run build && npm test"\`.
-- Small outputs pass through unchanged. Large ones become a stub of at most 14 lines with the exit code, summary, key error lines (with original line numbers) and a hash.
-- Need more detail: \`cortex_fetch_evicted\` with \`query\` (grep with context, \`/regex/\` allowed) or \`start_line\`/\`end_line\`. Fetch the full payload only when necessary.
+- Outputs under 300 characters pass through. Larger ones are triaged by the local Jev model: high-signal output (failures, diagnostics) stays verbatim; routine output becomes a \`JEV CONTEXT RECEIPT\` (line/byte counts, P(keep), core signal, hash). Very large high-signal output is condensed to a stub of key lines with original line numbers.
+- Need more detail: \`cortex_fetch_evicted\` with the receipt hash and a \`query\` (grep with context, \`/regex/\` allowed) or \`start_line\`/\`end_line\`. Without them it returns the full payload verbatim; do that only when necessary.
 - Exit codes are preserved, so \`&&\` chains behave normally.
 - If you cannot wrap a command, pipe it: \`some-cmd 2>&1 | {{CORTEX}} compress --label "some-cmd"\`.
 `,

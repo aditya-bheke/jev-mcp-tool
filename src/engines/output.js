@@ -1,6 +1,7 @@
 import { errorSignature, normalizeErrorText } from './errorIntel.js';
 import { writeSpool } from './evicted.js';
 import { analyzeOutput, buildStub, classifyCommand, knownFixLine, repeatLine } from './pruner.js';
+import { buildReceipt, buildTriageState, extractCoreSignal } from '../jev/optimizer.js';
 import { log } from '../core/logger.js';
 import { estimateTokens, sha256 } from '../core/util.js';
 
@@ -15,10 +16,6 @@ function splitLines(text) {
 function signatureSample(text) {
   if (text.length <= 2_000_000) return text;
   return `${text.slice(0, 1_000_000)}\n${text.slice(-1_000_000)}`;
-}
-
-function lastLines(text, n) {
-  return splitLines(text).slice(-n).join('\n');
 }
 
 function findRepeat(ctx, command, outputSignature) {
@@ -37,21 +34,29 @@ function findRepeat(ctx, command, outputSignature) {
 }
 
 /**
- * Jev-style non-destructive pruning of a command's output.
- * Small outputs pass through untouched; large ones are stored verbatim (DB, or a spool file when
- * the DB is not writable) and replaced by a compact stub with the core signal and a restore hash.
+ * Context optimization for one command output.
+ *
+ *   size gate (< jev.min_chars)            → intact
+ *   Jev Noul P(keep) >= jev.keep_threshold → intact, or condensed when larger than jev.keep_max_chars
+ *   Jev Noul P(keep) <  jev.keep_threshold → evicted, replaced by a JEV CONTEXT RECEIPT
+ *   Jev unavailable                         → deterministic: intact when small, else condensed stub
+ *
+ * Condensed and evicted payloads are stored verbatim (DB, or a spool file when the DB is not
+ * writable) and restorable with cortex_fetch_evicted.
  *
  * @param {object} p
- * @param {object|null} p.ctx      full context (DB available) or null
- * @param {object|null} p.fallback { root, dataDir, projectId, config } when ctx is null
+ * @param {object|null} p.ctx       full context (DB available) or null
+ * @param {object|null} p.fallback  { root, dataDir, projectId, config } when ctx is null
+ * @param {(state: string) => Promise<{probability: number, latency_ms?: number, via?: string}|null>} [p.decide]
  */
-export function processOutput({
-  ctx = null, fallback = null, text, command = null, exitCode = null, durationMs = null, toolName = 'cortex run', truncatedBytes = 0, maxLines = null,
+export async function processOutput({
+  ctx = null, fallback = null, text, command = null, exitCode = null, durationMs = null, toolName = 'cortex run', truncatedBytes = 0, maxLines = null, decide = null,
 }) {
   const env = ctx ?? fallback;
-  const config = env.config;
+  const { config } = env;
   const root = env.root ?? null;
   const p = config.pruning;
+  const j = config.jev;
   const lines = splitLines(text);
   const failed = exitCode != null ? exitCode !== 0 : null;
   const sig = failed === false ? null : errorSignature(text, root);
@@ -71,20 +76,52 @@ export function processOutput({
       log.debug(`repeat lookup failed: ${err.message}`);
     }
   }
+  const extras = [];
+  if (known) extras.push(knownFixLine(known));
+  if (repeat) extras.push(repeatLine(repeat));
+  if (truncatedBytes) extras.push(`capture truncated: ${truncatedBytes.toLocaleString('en-US')} bytes dropped from the middle`);
 
-  const small = lines.length <= p.inline_max_lines && text.length <= p.inline_max_chars;
-  let output;
-  let hash = null;
-  let evicted = false;
-  if (small) {
-    const extras = [];
-    if (known) extras.push(knownFixLine(known));
-    if (repeat) extras.push(repeatLine(repeat));
-    output = String(text).replace(/\n+$/, '');
-    if (extras.length) output += `${output ? '\n' : ''}${extras.map((e) => `[cortex] ${e}`).join('\n')}`;
+  // 1. Decide.
+  let pKeep = null;
+  let jevLatency = null;
+  let decidedBy = 'heuristic';
+  let mode;
+  if (text.length < j.min_chars) {
+    mode = 'intact';
   } else {
-    const analysis = analyzeOutput(lines, { command, root });
+    if (decide && j.enabled) {
+      try {
+        const verdict = await decide(buildTriageState(text, { command, exitCode, lineCount: lines.length, excerptChars: j.excerpt_chars }));
+        if (verdict && Number.isFinite(verdict.probability)) {
+          pKeep = verdict.probability;
+          jevLatency = verdict.latency_ms ?? null;
+          decidedBy = `jev:${verdict.via ?? 'local'}`;
+        }
+      } catch (err) {
+        log.debug(`Jev triage unavailable: ${err.message}`);
+      }
+    }
+    if (pKeep == null) mode = lines.length <= p.inline_max_lines && text.length <= p.inline_max_chars ? 'intact' : 'condensed';
+    else if (pKeep >= j.keep_threshold) mode = text.length <= j.keep_max_chars ? 'intact' : 'condensed';
+    else mode = 'evicted';
+  }
+
+  // 2. Render.
+  let output = null;
+  let hash = null;
+  let signal = null;
+  if (mode === 'evicted') {
     hash = sha256(text);
+    signal = extractCoreSignal(lines);
+    output = buildReceipt({ hash, lineCount: lines.length, bytes: Buffer.byteLength(text, 'utf8'), pKeep, signal, command, exitCode, durationMs, extras });
+    if (output.length >= text.length * 0.7) {
+      mode = 'intact'; // the receipt would not save anything
+      hash = null;
+    }
+  } else if (mode === 'condensed') {
+    hash = sha256(text);
+    const analysis = analyzeOutput(lines, { command, root });
+    signal = analysis.signalText ?? analysis.summary ?? null;
     output = buildStub({
       analysis,
       hash,
@@ -98,8 +135,17 @@ export function processOutput({
       lineCount: lines.length,
       charCount: text.length,
       truncatedBytes,
+      pKeep,
     });
-    evicted = true;
+  }
+  if (mode === 'intact') {
+    output = String(text).replace(/\n+$/, '');
+    const notes = extras.filter((e) => !e.startsWith('capture truncated'));
+    if (notes.length) output += `${output ? '\n' : ''}${notes.map((e) => `[cortex] ${e}`).join('\n')}`;
+  }
+
+  // 3. Persist the full payload.
+  if (hash) {
     const record = {
       hash,
       tool_name: toolName,
@@ -108,8 +154,9 @@ export function processOutput({
       original_size: text.length,
       line_count: lines.length,
       stub: output,
-      signal: analysis.signalText ?? analysis.summary ?? null,
+      signal,
       error_signature: sig?.signature ?? null,
+      p_keep: pKeep,
       raw_content: text,
     };
     let stored = false;
@@ -121,12 +168,12 @@ export function processOutput({
         log.warn(`could not store evicted payload in the database: ${err.message}`);
       }
     }
-    if (!stored) {
-      const dir = writeSpool({ root, dataDir: env.dataDir ?? null, projectId: env.projectId ?? 'global' }, record);
-      if (!dir) output += '\n[cortex] warning: the full output could not be saved (no writable storage); rerun with `cortex run --raw` if you need it';
+    if (!stored && !writeSpool({ root, dataDir: env.dataDir ?? null, projectId: env.projectId ?? 'global' }, record)) {
+      output += '\n[cortex] warning: the full output could not be saved (no writable storage); rerun with `cortex run --raw` if you need it';
     }
   }
 
+  // 4. Bookkeeping.
   if (ctx) {
     try {
       ctx.db.run(
@@ -153,21 +200,24 @@ export function processOutput({
         log.debug(`error signature log failed: ${err.message}`);
       }
     }
-    if (evicted) {
+    if (pKeep != null) {
+      ctx.engines.telemetry.record('jev_triage', { latency_ms: jevLatency, meta: { p_keep: pKeep, mode, via: decidedBy } });
+    }
+    if (hash) {
       ctx.engines.telemetry.record('eviction', {
         input_chars: text.length,
         output_chars: output.length,
         tokens_saved: Math.max(0, estimateTokens(text.length) - estimateTokens(output.length)),
-        meta: { command, lines: lines.length, exit_code: exitCode },
+        meta: { command, lines: lines.length, exit_code: exitCode, mode, p_keep: pKeep, decided_by: decidedBy },
       });
     }
     if (failed && command && config.checkpoint.auto_on_test_failure && classifyCommand(command) === 'test output') {
       try {
-        ctx.engines.checkpoints.autoSnapshot({ command, errorText: sig?.sample ?? lastLines(text, 15) });
+        ctx.engines.checkpoints.autoSnapshot({ command, errorText: sig?.sample ?? lines.slice(-15).join('\n') });
       } catch (err) {
         log.debug(`auto checkpoint failed: ${err.message}`);
       }
     }
   }
-  return { output, evicted, hash, failed };
+  return { output, mode, hash, failed, p_keep: pKeep, decided_by: decidedBy };
 }

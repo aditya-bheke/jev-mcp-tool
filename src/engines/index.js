@@ -6,7 +6,6 @@ import { InvestigationEngine } from './investigations.js';
 import { MemoryEngine } from './memory.js';
 import { Router } from './router.js';
 import { SearchEngine } from './search.js';
-import { SemanticReranker } from './semantic.js';
 import { Telemetry } from './telemetry.js';
 
 /** Engines only keep a reference to ctx; they reach each other lazily through ctx.engines. */
@@ -16,7 +15,6 @@ export function createEngines(ctx) {
     memory: new MemoryEngine(ctx),
     indexer: new Indexer(ctx),
     search: new SearchEngine(ctx),
-    semantic: new SemanticReranker(ctx),
     evicted: new EvictionStore(ctx),
     errors: new ErrorIntel(ctx),
     checkpoints: new CheckpointEngine(ctx),
