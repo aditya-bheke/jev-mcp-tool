@@ -1,0 +1,10 @@
+node_modules/
+*.log
+.DS_Store
+
+# cortex-local runtime data (never commit)
+.codex/cortex.db
+.codex/cortex.db-*
+.codex/cortex.log
+.codex/spool/
+.cortex-spool/
